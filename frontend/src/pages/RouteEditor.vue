@@ -32,7 +32,12 @@ const selectedCoverId = ref<number | null>(null)
 
 const previewCoverId = computed<number | null>(() => selectedCoverId.value)
 
-const { cover: previewCover, timeline: previewTimeline, transitDays } = useCoverRoute(previewCoverId)
+const {
+  cover: previewCover,
+  timeline: previewTimeline,
+  transitDays,
+  load: reloadPreview
+} = useCoverRoute(previewCoverId, { mode: 'live' })
 
 const nodeTimeline = computed<TimelineNode[]>(() =>
   (route.value?.nodes ?? []).map((node) => ({
@@ -86,6 +91,7 @@ const fallbackTimeline = computed<TimelineNode[]>(() => {
       franking: [],
       cancelPmIds: [],
       routeId: route.value.id ?? null,
+      routeSnapshot: null,
       viaPoints: [],
       registered: false,
       conditionGrade: '中品',
@@ -115,6 +121,14 @@ watch(attachedCovers, (list) => {
     selectedCoverId.value = list[0].id
   }
 })
+
+// 编辑邮路（保存信息 / 节点增删拖拽）后，live 预览要跟随当前邮路刷新
+watch(
+  () => route.value?.updatedAt,
+  () => {
+    void reloadPreview()
+  }
+)
 
 function syncForm(): void {
   const current = route.value
@@ -194,14 +208,18 @@ async function attachCover(): Promise<void> {
     ElMessage.warning('请选择要挂到此邮路的实寄封')
     return
   }
-  await coverStore.update(coverId, { routeId: id })
-  ElMessage.success('实寄封已挂到该邮路')
+  try {
+    await coverStore.attachRoute(coverId, id)
+    ElMessage.success('实寄封已挂到该邮路，已按当前邮路冻结节点记录')
+  } catch (err) {
+    ElMessage.info(err instanceof Error ? err.message : '挂入失败')
+  }
 }
 
 async function detachCover(cover: Cover): Promise<void> {
   if (typeof cover.id !== 'number') return
-  await coverStore.update(cover.id, { routeId: null })
-  ElMessage.success('已从邮路摘除')
+  await coverStore.detachRoute(cover.id)
+  ElMessage.success('已从邮路摘除；封上仍保留挂入时的邮路记录')
 }
 
 function openCover(cover: Cover): void {

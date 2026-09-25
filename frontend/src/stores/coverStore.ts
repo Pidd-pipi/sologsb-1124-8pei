@@ -3,6 +3,8 @@ import { defineStore } from 'pinia'
 import { db, saveAsset } from '@/utils/db'
 import type { Cover, FrankingItem } from '@/types/cover'
 import type { StamplessEntry } from '@/types/stampentry'
+import type { RouteSnapshot } from '@/types/route'
+import { snapshotRoute } from '@/types/route'
 import { nextSerialNo, nowIso } from '@/utils/id'
 import type { ImagePayload } from './postmarkStore'
 
@@ -33,11 +35,20 @@ export const useCoverStore = defineStore('cover', () => {
     images?: Partial<Record<'front' | 'back', ImagePayload>>
   ): Promise<number> {
     const now = nowIso()
+    const routeId = typeof input.routeId === 'number' ? input.routeId : null
+    // 登记时已挂邮路：立刻按当前邮路冻结快照，与「挂入邮路」语义一致。
+    let routeSnapshot: RouteSnapshot | null = null
+    if (routeId != null) {
+      const rt = await db.routes.get(routeId)
+      if (rt) routeSnapshot = snapshotRoute(rt, now)
+    }
     const record: Cover = {
       ...input,
       coverNo: input.coverNo || nextCoverNo(),
       franking: input.franking.map((f) => ({ ...f })),
       cancelPmIds: [...input.cancelPmIds],
+      routeId: routeSnapshot ? routeId : null,
+      routeSnapshot,
       viaPoints: [...input.viaPoints],
       createdAt: now,
       updatedAt: now
@@ -63,6 +74,52 @@ export const useCoverStore = defineStore('cover', () => {
 
   async function update(id: number, patch: Partial<Cover>): Promise<void> {
     await db.covers.update(id, { ...patch, updatedAt: nowIso() })
+    await load()
+  }
+
+  /**
+   * 把封挂入邮路：按当前邮路冻结快照（邮路号 / 名称 / 节点 + 挂入时间）。
+   * 邮路不存在或与原邮路相同都不做冻结。
+   */
+  async function attachRoute(coverId: number, routeId: number): Promise<void> {
+    const cover = await db.covers.get(coverId)
+    if (!cover) throw new Error('实寄封不存在')
+    if (cover.routeId === routeId && cover.routeSnapshot?.routeId === routeId) {
+      throw new Error('该封已挂在此邮路上')
+    }
+    const rt = await db.routes.get(routeId)
+    if (!rt) throw new Error('邮路不存在')
+    await db.covers.update(coverId, {
+      routeId,
+      routeSnapshot: snapshotRoute(rt, nowIso()),
+      updatedAt: nowIso()
+    })
+    await load()
+  }
+
+  /**
+   * 主动同步当前邮路：用当前邮路覆盖历史快照，仅替换邮路号 / 名称 / 节点，
+   * 并记录同步时间；挂入时间保持首次挂入时不变。摘除邮路后不允许同步。
+   */
+  async function syncRoute(coverId: number): Promise<void> {
+    const cover = await db.covers.get(coverId)
+    if (!cover) throw new Error('实寄封不存在')
+    if (typeof cover.routeId !== 'number' || !cover.routeSnapshot) {
+      throw new Error('该封未挂邮路，无法同步')
+    }
+    const rt = await db.routes.get(cover.routeId)
+    if (!rt) throw new Error('当前邮路已不存在')
+    const syncedAt = nowIso()
+    await db.covers.update(coverId, {
+      routeSnapshot: snapshotRoute(rt, cover.routeSnapshot.attachedAt, syncedAt),
+      updatedAt: syncedAt
+    })
+    await load()
+  }
+
+  /** 摘除邮路：解除关联，但保留冻结快照，旧时间轴仍按快照展示。 */
+  async function detachRoute(coverId: number): Promise<void> {
+    await db.covers.update(coverId, { routeId: null, updatedAt: nowIso() })
     await load()
   }
 
@@ -126,6 +183,9 @@ export const useCoverStore = defineStore('cover', () => {
     create,
     update,
     remove,
+    attachRoute,
+    syncRoute,
+    detachRoute,
     addEntry,
     removeEntry,
     byId,

@@ -5,13 +5,14 @@
 import Dexie, { type Table } from 'dexie'
 import type { Postmark } from '@/types/postmark'
 import type { Cover } from '@/types/cover'
-import type { PostalRoute } from '@/types/route'
+import type { PostalRoute, RouteSnapshot } from '@/types/route'
 import type { StamplessEntry } from '@/types/stampentry'
 import type { AssetOwnerType, AssetSide, CatalogAsset } from '@/types/asset'
+import { snapshotRoute } from '@/types/route'
 
 export const DB_NAME = 'gbpostmark'
 /** 当前数据结构版本号，升级迁移写在下面对应的 version() 中 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 export class GbPostmarkDatabase extends Dexie {
   postmarks!: Table<Postmark, number>
@@ -73,6 +74,44 @@ export class GbPostmarkDatabase extends Dexie {
             if (typeof rt.totalDays !== 'number') rt.totalDays = 0
           })
       })
+
+    // v3：实寄封挂入邮路时冻结快照（邮路号/名称/节点），旧数据首次升级按当前邮路补齐。
+    // 已挂邮路但邮路已不存在的，保持未关联（routeId 置空，不造假快照）。
+    this.version(DB_VERSION)
+      .stores({
+        postmarks:
+          '++id, pmNo, type, office, province, yearFrom, yearTo, scarceLevel, inkColor, bilingual',
+        covers:
+          '++id, coverNo, sentFrom, sentTo, postDate, conditionGrade, registered, routeId, acquireFrom',
+        routes: '++id, routeNo, name, era, transport, totalDays',
+        stampEntries: '++id, coverId, stampName, variety, issueYear',
+        assets: '++id, ownerType, ownerId, side, [ownerType+ownerId]'
+      })
+      .upgrade(async (tx) => {
+        const routes = await tx.table<PostalRoute, number>('routes').toArray()
+        const routeById = new Map<number, PostalRoute>()
+        for (const rt of routes) {
+          if (typeof rt.id === 'number') routeById.set(rt.id, rt)
+        }
+        const stamp = new Date().toISOString()
+        await tx
+          .table('covers')
+          .toCollection()
+          .modify((cv: Partial<Cover>) => {
+            if (typeof cv.routeId !== 'number') {
+              cv.routeId = null
+              cv.routeSnapshot = null
+              return
+            }
+            const rt = routeById.get(cv.routeId)
+            if (!rt) {
+              cv.routeId = null
+              cv.routeSnapshot = null
+              return
+            }
+            cv.routeSnapshot = snapshotRoute(rt, stamp)
+          })
+      })
   }
 }
 
@@ -82,6 +121,38 @@ export const db = new GbPostmarkDatabase()
 export async function initDatabase(): Promise<void> {
   await db.open()
   await seedIfEmpty()
+  await backfillRouteSnapshots()
+}
+
+/**
+ * 历史数据兜底：已挂邮路却没有快照的封（如早期数据、异常写入），
+ * 首次打开时按当前邮路补齐；当前邮路已不存在则摘除关联、保持未关联。
+ * 正常情况下 v3 升级迁移已完成补齐，这里只处理漏网记录。
+ */
+export async function backfillRouteSnapshots(): Promise<void> {
+  const covers = await db.covers.toArray()
+  const missing = covers.filter(
+    (c) => typeof c.routeId === 'number' && (!c.routeSnapshot || c.routeSnapshot.routeId !== c.routeId)
+  )
+  const dangling = covers.filter(
+    (c) => c.routeSnapshot && (typeof c.routeId !== 'number' || c.routeId == null)
+  )
+  if (!missing.length && !dangling.length) return
+  const stamp = new Date().toISOString()
+  await db.transaction('rw', db.covers, db.routes, async () => {
+    for (const cover of missing) {
+      if (typeof cover.id !== 'number' || typeof cover.routeId !== 'number') continue
+      const rt = await db.routes.get(cover.routeId)
+      if (rt) {
+        await db.covers.update(cover.id, { routeSnapshot: snapshotRoute(rt, stamp) })
+      } else {
+        await db.covers.update(cover.id, { routeId: null, routeSnapshot: null })
+      }
+    }
+    for (const cover of dangling) {
+      if (typeof cover.id === 'number') await db.covers.update(cover.id, { routeId: null })
+    }
+  })
 }
 
 /** 写入或覆盖一张原图（同 owner + side 视为同一张）。 */
@@ -356,7 +427,15 @@ function seedRoutes(): PostalRoute[] {
   ]
 }
 
-function seedCovers(): Cover[] {
+function seedCovers(routes: PostalRoute[]): Cover[] {
+  const routeById = new Map<number, PostalRoute>()
+  for (const rt of routes) {
+    if (typeof rt.id === 'number') routeById.set(rt.id, rt)
+  }
+  const snap = (routeId: number | null): RouteSnapshot | null => {
+    const rt = routeId == null ? undefined : routeById.get(routeId)
+    return rt ? snapshotRoute(rt, SEED_TS, SEED_TS) : null
+  }
   return [
     {
       id: 1,
@@ -371,6 +450,7 @@ function seedCovers(): Cover[] {
       ],
       cancelPmIds: [1],
       routeId: 1,
+      routeSnapshot: snap(1),
       viaPoints: ['苏州', '镇江'],
       registered: true,
       conditionGrade: '上品',
@@ -393,6 +473,7 @@ function seedCovers(): Cover[] {
       franking: [{ stampName: '帆船邮票', denomination: 4, count: 2 }],
       cancelPmIds: [2],
       routeId: 2,
+      routeSnapshot: snap(2),
       viaPoints: ['济南', '徐州', '南京'],
       registered: false,
       conditionGrade: '中品',
@@ -418,6 +499,7 @@ function seedCovers(): Cover[] {
       ],
       cancelPmIds: [3],
       routeId: 3,
+      routeSnapshot: snap(3),
       viaPoints: ['长沙', '汉口'],
       registered: true,
       conditionGrade: '下品',
@@ -440,6 +522,7 @@ function seedCovers(): Cover[] {
       franking: [{ stampName: '普八邮票', denomination: 8, count: 1 }],
       cancelPmIds: [5],
       routeId: null,
+      routeSnapshot: null,
       viaPoints: [],
       registered: false,
       conditionGrade: '中品',
@@ -532,7 +615,7 @@ export async function seedIfEmpty(): Promise<void> {
   if (count > 0) return
   const postmarks = seedPostmarks()
   const routes = seedRoutes()
-  const covers = seedCovers()
+  const covers = seedCovers(routes)
   const entries = seedStampEntries()
   await db.transaction('rw', db.postmarks, db.covers, db.routes, db.stampEntries, async () => {
     await db.postmarks.bulkPut(postmarks)

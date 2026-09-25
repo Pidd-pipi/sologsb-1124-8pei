@@ -11,7 +11,7 @@ import { usePostmarkStore } from '@/stores/postmarkStore'
 import { useRouteStore } from '@/stores/routeStore'
 import type { ImagePayload } from '@/stores/postmarkStore'
 import type { Cover, FrankingItem } from '@/types/cover'
-import { CONDITION_GRADES, createEmptyCover } from '@/types/cover'
+import { CONDITION_GRADES, coverRouteLabel, createEmptyCover, isRouteDetached } from '@/types/cover'
 import { clearDraft, loadDraft, saveDraft } from '@/utils/draft'
 import { joinCn, nowIso, toNumber } from '@/utils/id'
 
@@ -159,10 +159,13 @@ function pmLabel(id: number): string {
   return postmarkStore.labelOf(id)
 }
 
-function routeLabel(routeId: number | null): string {
-  if (routeId == null) return '未挂邮路'
-  const route = routeStore.byId(routeId)
-  return route ? `${route.routeNo} ${route.name}` : `邮路 #${routeId}`
+function routeLabel(cover: Cover): string {
+  // 摘除邮路后，行内仍按保留的历史快照展示邮路名
+  return coverRouteLabel(cover, (id) => routeStore.byId(id))
+}
+
+function routeIsDetached(cover: Cover): boolean {
+  return isRouteDetached(cover)
 }
 </script>
 
@@ -262,8 +265,11 @@ function routeLabel(routeId: number | null): string {
       <el-table-column label="给据" width="80">
         <template #default="{ row }">{{ row.registered ? '是' : '否' }}</template>
       </el-table-column>
-      <el-table-column label="邮路" min-width="150">
-        <template #default="{ row }">{{ routeLabel(row.routeId) }}</template>
+      <el-table-column label="邮路" min-width="170">
+        <template #default="{ row }">
+          {{ routeLabel(row) }}
+          <el-tag v-if="routeIsDetached(row)" size="small" type="info" effect="plain">已摘除</el-tag>
+        </template>
       </el-table-column>
       <el-table-column label="操作" width="90">
         <template #default="{ row }">

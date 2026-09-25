@@ -12,13 +12,14 @@ import { usePostmarkStore } from '@/stores/postmarkStore'
 import { useRouteStore } from '@/stores/routeStore'
 import type { Postmark } from '@/types/postmark'
 import type { TimelineNode } from '@/types/route'
+import { routeLabelOf } from '@/types/route'
 import type { StamplessEntry } from '@/types/stampentry'
 import {
   COVER_POSITIONS,
   VARIETY_TYPES,
   createEmptyStampEntry
 } from '@/types/stampentry'
-import { CONDITION_GRADES } from '@/types/cover'
+import { CONDITION_GRADES, coverRouteLabel, isRouteDetached } from '@/types/cover'
 import { loadAssets, saveAsset } from '@/utils/db'
 import { nowIso } from '@/utils/id'
 
@@ -33,8 +34,20 @@ const coverId = computed<number | null>(() => {
   return Number.isFinite(n) && n > 0 ? n : null
 })
 
-const { cover, route, timeline, transitDays, missingDateNodes, chronological, error, load } =
-  useCoverRoute(coverId)
+const {
+  cover,
+  liveRoute,
+  snapshot,
+  detached,
+  routeChanged,
+  timeline,
+  transitDays,
+  missingDateNodes,
+  chronological,
+  error,
+  load
+} = useCoverRoute(coverId)
+const syncing = ref(false)
 
 const frontUrl = ref('')
 const backUrl = ref('')
@@ -197,8 +210,45 @@ function backToList(): void {
 }
 
 function openRoute(): void {
-  if (route.value?.id != null) void router.push(`/routes/${route.value.id}`)
+  if (liveRoute.value?.id != null) void router.push(`/routes/${liveRoute.value.id}`)
 }
+
+/** 所属邮路展示：当前关联用当前名，摘除后用保留的历史快照名。 */
+const routeText = computed(() =>
+  cover.value ? coverRouteLabel(cover.value, (id) => routeStore.byId(id)) : '未挂邮路'
+)
+
+/** ISO 时间戳转本地可读时间，空串返回占位。 */
+function formatTime(iso: string | undefined | null): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad2 = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(
+    d.getHours()
+  )}:${pad2(d.getMinutes())}`
+}
+
+const attachedAtText = computed(() => formatTime(snapshot.value?.attachedAt))
+const syncedAtText = computed(() => formatTime(snapshot.value?.syncedAt))
+
+async function syncRoute(): Promise<void> {
+  const id = coverId.value
+  if (id == null || !liveRoute.value) return
+  syncing.value = true
+  try {
+    await coverStore.syncRoute(id)
+    await load()
+    ElMessage.success(`已按当前邮路「${routeLabelOf(liveRoute.value)}」替换历史快照`)
+  } catch (err) {
+    ElMessage.warning(err instanceof Error ? err.message : '同步失败')
+  } finally {
+    syncing.value = false
+  }
+}
+
+// 供模板使用的派生标记
+const routeDetached = computed(() => isRouteDetached(cover.value))
 </script>
 
 <template>
@@ -219,7 +269,7 @@ function openRoute(): void {
       </div>
       <div class="cover-detail__actions">
         <el-button @click="backToList">返回目录</el-button>
-        <el-button v-if="route" type="primary" plain @click="openRoute">打开邮路编辑器</el-button>
+        <el-button v-if="liveRoute" type="primary" plain @click="openRoute">打开邮路编辑器</el-button>
       </div>
     </header>
 
@@ -240,7 +290,15 @@ function openRoute(): void {
           <div><dt>来源</dt><dd>{{ cover.acquireFrom || '未记' }}</dd></div>
           <div><dt>购入价</dt><dd>{{ cover.price }} 元</dd></div>
           <div><dt>藏册页位</dt><dd>{{ cover.storageAlbum || '未入册' }}</dd></div>
-          <div><dt>所属邮路</dt><dd>{{ route ? `${route.routeNo} ${route.name}` : '未挂邮路' }}</dd></div>
+          <div>
+            <dt>所属邮路</dt>
+            <dd>
+              <span>{{ routeText }}</span>
+              <el-tag v-if="routeDetached" size="small" type="info" effect="plain" class="cover-detail__route-tag">
+                已摘除 · 保留挂入时记录
+              </el-tag>
+            </dd>
+          </div>
         </dl>
         <div class="cover-detail__grade">
           <span class="cover-detail__grade-label">标记品相：</span>
@@ -283,7 +341,25 @@ function openRoute(): void {
       </section>
 
       <section class="gb-panel">
-        <h2 class="gb-panel__title">寄递事实时间轴</h2>
+        <div class="cover-detail__section-head">
+          <h2 class="gb-panel__title">寄递事实时间轴</h2>
+          <div v-if="snapshot" class="cover-detail__snapshot">
+            <span class="cover-detail__snapshot-meta">
+              挂入于 {{ attachedAtText }}<template v-if="syncedAtText"> · 最近同步 {{ syncedAtText }}</template>
+            </span>
+            <el-tag v-if="detached" size="small" type="info" effect="plain">邮路已摘除，按挂入时记录展示</el-tag>
+            <el-tag v-else-if="!routeChanged" size="small" type="success" effect="plain">与当前邮路一致</el-tag>
+            <el-button
+              v-else
+              size="small"
+              type="warning"
+              :loading="syncing"
+              @click="syncRoute"
+            >
+              同步当前邮路
+            </el-button>
+          </div>
+        </div>
         <p v-if="!chronological" class="cover-detail__warn">
           日期先后有误：请核对寄出、中转与到达日期的顺序。
         </p>
@@ -291,6 +367,10 @@ function openRoute(): void {
           缺日警示：{{ missingDateNodes.map((n) => n.office).join('、') }} 尚未确定日期。
         </p>
         <RouteTimeline :nodes="timeline" @select="onTimelineSelect" />
+        <p v-if="snapshot && routeChanged" class="cover-detail__snapshot-note">
+          时间轴按挂入时冻结的邮路节点展示；当前邮路（{{ routeText }}）已有改动，
+          点击「同步当前邮路」才会替换这份历史记录。
+        </p>
       </section>
 
       <section class="gb-panel">
@@ -434,6 +514,24 @@ function openRoute(): void {
   border: 1px solid #ecd3a5;
   border-radius: 8px;
   padding: 6px 10px;
+}
+.cover-detail__route-tag {
+  margin-left: 8px;
+}
+.cover-detail__snapshot {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.cover-detail__snapshot-meta {
+  font-size: 12px;
+  color: var(--gb-muted);
+}
+.cover-detail__snapshot-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--gb-muted);
 }
 .cover-detail__section-head {
   display: flex;
