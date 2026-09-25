@@ -24,6 +24,17 @@ export interface TimelineNode {
   kind: 'sent' | 'transit' | 'arrive'
 }
 
+/**
+ * 邮路快照：实寄封挂入邮路那一刻的邮路号、名称与节点。
+ * 邮路日后再改不影响已挂封的寄递事实，只有主动同步才会替换。
+ */
+export interface RouteSnapshot {
+  routeId: number
+  routeNo: string
+  name: string
+  nodes: RouteNode[]
+}
+
 export interface PostalRoute {
   id?: number
   /** 邮路号，如 RT-0001 */
@@ -58,4 +69,29 @@ export function createEmptyRoute(): PostalRoute {
     createdAt: '',
     updatedAt: ''
   }
+}
+
+/** 由当前邮路生成一份快照，挂封 / 同步时调用。 */
+export function createRouteSnapshot(route: PostalRoute): RouteSnapshot {
+  return {
+    routeId: typeof route.id === 'number' ? route.id : 0,
+    routeNo: route.routeNo,
+    name: route.name,
+    nodes: route.nodes.map((n) => ({ ...n }))
+  }
+}
+
+/** 邮路现状与封上快照是否已不一致（邮路号 / 名称 / 节点任一变动即为待同步）。 */
+export function isSnapshotStale(snapshot: RouteSnapshot, route: PostalRoute): boolean {
+  if (snapshot.routeNo !== route.routeNo || snapshot.name !== route.name) return true
+  if (snapshot.nodes.length !== route.nodes.length) return true
+  return snapshot.nodes.some((node, index) => {
+    const current = route.nodes[index]
+    return (
+      !current ||
+      node.office !== current.office ||
+      node.arriveDate !== current.arriveDate ||
+      node.transitMark !== current.transitMark
+    )
+  })
 }

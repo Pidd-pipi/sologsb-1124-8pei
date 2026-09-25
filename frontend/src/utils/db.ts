@@ -6,12 +6,13 @@ import Dexie, { type Table } from 'dexie'
 import type { Postmark } from '@/types/postmark'
 import type { Cover } from '@/types/cover'
 import type { PostalRoute } from '@/types/route'
+import { createRouteSnapshot } from '@/types/route'
 import type { StamplessEntry } from '@/types/stampentry'
 import type { AssetOwnerType, AssetSide, CatalogAsset } from '@/types/asset'
 
 export const DB_NAME = 'gbpostmark'
 /** 当前数据结构版本号，升级迁移写在下面对应的 version() 中 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 export class GbPostmarkDatabase extends Dexie {
   postmarks!: Table<Postmark, number>
@@ -71,6 +72,41 @@ export class GbPostmarkDatabase extends Dexie {
           .modify((rt: Partial<PostalRoute>) => {
             if (!Array.isArray(rt.nodes)) rt.nodes = []
             if (typeof rt.totalDays !== 'number') rt.totalDays = 0
+          })
+      })
+
+    // v3：实寄封挂入邮路时留存邮路快照（号 / 名称 / 节点），旧数据按当前邮路补齐。
+    // 已挂邮路但邮路已不存在的封保持原样（routeId 仍在、快照为空），未挂邮路的封不补。
+    this.version(DB_VERSION)
+      .stores({
+        postmarks:
+          '++id, pmNo, type, office, province, yearFrom, yearTo, scarceLevel, inkColor, bilingual',
+        covers:
+          '++id, coverNo, sentFrom, sentTo, postDate, conditionGrade, registered, routeId, acquireFrom',
+        routes: '++id, routeNo, name, era, transport, totalDays',
+        stampEntries: '++id, coverId, stampName, variety, issueYear',
+        assets: '++id, ownerType, ownerId, side, [ownerType+ownerId]'
+      })
+      .upgrade(async (tx) => {
+        const routes = await tx
+          .table('routes')
+          .toArray()
+          .then((rows: PostalRoute[]) => new Map(rows.map((r) => [r.id, r])))
+        await tx
+          .table('covers')
+          .toCollection()
+          .modify((cv: Partial<Cover>) => {
+            if (cv.routeSnapshot !== undefined) return
+            cv.routeSnapshot = null
+            cv.routeSnapshottedAt = ''
+            if (typeof cv.routeId === 'number') {
+              const rt = routes.get(cv.routeId)
+              if (rt) {
+                cv.routeSnapshot = createRouteSnapshot(rt)
+                // 迁移时不留同步时间，界面按「旧数据首次打开时补齐」呈现
+                cv.routeSnapshottedAt = ''
+              }
+            }
           })
       })
   }
@@ -357,6 +393,11 @@ function seedRoutes(): PostalRoute[] {
 }
 
 function seedCovers(): Cover[] {
+  const seededRoutes = seedRoutes()
+  const snapshotOf = (id: number) => {
+    const route = seededRoutes.find((r) => r.id === id)
+    return route ? createRouteSnapshot(route) : null
+  }
   return [
     {
       id: 1,
@@ -371,6 +412,8 @@ function seedCovers(): Cover[] {
       ],
       cancelPmIds: [1],
       routeId: 1,
+      routeSnapshot: snapshotOf(1),
+      routeSnapshottedAt: SEED_TS,
       viaPoints: ['苏州', '镇江'],
       registered: true,
       conditionGrade: '上品',
@@ -393,6 +436,8 @@ function seedCovers(): Cover[] {
       franking: [{ stampName: '帆船邮票', denomination: 4, count: 2 }],
       cancelPmIds: [2],
       routeId: 2,
+      routeSnapshot: snapshotOf(2),
+      routeSnapshottedAt: SEED_TS,
       viaPoints: ['济南', '徐州', '南京'],
       registered: false,
       conditionGrade: '中品',
@@ -418,6 +463,8 @@ function seedCovers(): Cover[] {
       ],
       cancelPmIds: [3],
       routeId: 3,
+      routeSnapshot: snapshotOf(3),
+      routeSnapshottedAt: SEED_TS,
       viaPoints: ['长沙', '汉口'],
       registered: true,
       conditionGrade: '下品',
@@ -440,6 +487,8 @@ function seedCovers(): Cover[] {
       franking: [{ stampName: '普八邮票', denomination: 8, count: 1 }],
       cancelPmIds: [5],
       routeId: null,
+      routeSnapshot: null,
+      routeSnapshottedAt: '',
       viaPoints: [],
       registered: false,
       conditionGrade: '中品',

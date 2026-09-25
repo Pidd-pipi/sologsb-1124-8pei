@@ -3,13 +3,13 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import RouteTimeline from '@/components/common/RouteTimeline.vue'
-import { buildTimeline, useCoverRoute } from '@/hooks/useCoverRoute'
+import { buildTimeline } from '@/hooks/useCoverRoute'
 import { computeTotalDays, createRouteNode, useRouteStore } from '@/stores/routeStore'
 import { useCoverStore } from '@/stores/coverStore'
 import type { Cover } from '@/types/cover'
 import type { PostalRoute, RouteNode, TimelineNode } from '@/types/route'
-import { TRANSPORT_MODES, createEmptyRoute } from '@/types/route'
-import { toGanzhi, validateChronology } from '@/utils/dateRange'
+import { TRANSPORT_MODES, createEmptyRoute, isSnapshotStale } from '@/types/route'
+import { daysBetween, toGanzhi, validateChronology } from '@/utils/dateRange'
 import { nowIso } from '@/utils/id'
 
 const props = defineProps<{ id: string }>()
@@ -30,9 +30,30 @@ const nodeForm = reactive<RouteNode>(createRouteNode())
 const insertIndex = ref<number | null>(null)
 const selectedCoverId = ref<number | null>(null)
 
-const previewCoverId = computed<number | null>(() => selectedCoverId.value)
+/**
+ * 编辑器预览始终按「正在编辑的邮路」实时拼时间轴，
+ * 便于查看节点改动效果；封详情页的时间轴则按挂入时的快照固定展示。
+ */
+const previewCover = computed<Cover | null>(() =>
+  selectedCoverId.value == null ? null : coverStore.byId(selectedCoverId.value)
+)
 
-const { cover: previewCover, timeline: previewTimeline, transitDays } = useCoverRoute(previewCoverId)
+const previewTimeline = computed<TimelineNode[]>(() =>
+  previewCover.value ? buildTimeline(previewCover.value, route.value) : []
+)
+
+const previewTransitDays = computed<number | null>(() => {
+  const c = previewCover.value
+  if (!c) return null
+  return daysBetween(c.postDate, c.arriveDate)
+})
+
+/** 该封在本邮路上的快照是否已与现状不一致 */
+function coverSnapshotStale(cover: Cover): boolean {
+  if (cover.routeId !== routeId.value) return false
+  const snap = cover.routeSnapshot
+  return !!snap && !!route.value && isSnapshotStale(snap, route.value)
+}
 
 const nodeTimeline = computed<TimelineNode[]>(() =>
   (route.value?.nodes ?? []).map((node) => ({
@@ -86,6 +107,8 @@ const fallbackTimeline = computed<TimelineNode[]>(() => {
       franking: [],
       cancelPmIds: [],
       routeId: route.value.id ?? null,
+      routeSnapshot: null,
+      routeSnapshottedAt: '',
       viaPoints: [],
       registered: false,
       conditionGrade: '中品',
@@ -195,13 +218,13 @@ async function attachCover(): Promise<void> {
     return
   }
   await coverStore.update(coverId, { routeId: id })
-  ElMessage.success('实寄封已挂到该邮路')
+  ElMessage.success('实寄封已挂到该邮路，邮路号、名称与节点已按当前版本留存')
 }
 
 async function detachCover(cover: Cover): Promise<void> {
   if (typeof cover.id !== 'number') return
   await coverStore.update(cover.id, { routeId: null })
-  ElMessage.success('已从邮路摘除')
+  ElMessage.success('已从邮路摘除，挂入时的寄递记录仍保留')
 }
 
 function openCover(cover: Cover): void {
@@ -351,6 +374,9 @@ function nodeGanzhi(node: RouteNode): string {
           <li v-for="item in attachedCovers" :key="item.id">
             <strong>{{ item.coverNo }}</strong>
             <span>{{ item.sentFrom }} → {{ item.sentTo }}</span>
+            <el-tag v-if="coverSnapshotStale(item)" size="small" type="warning" effect="plain">
+              快照待同步
+            </el-tag>
             <el-button size="small" link type="primary" @click="openCover(item)">详情</el-button>
             <el-button size="small" link type="danger" @click="detachCover(item)">摘除</el-button>
           </li>
@@ -364,7 +390,8 @@ function nodeGanzhi(node: RouteNode): string {
         <h2 class="gb-panel__title">按实寄封预览寄递时间轴</h2>
         <p v-if="previewCover" class="route-editor__hint">
           预览：{{ previewCover.coverNo }} · 在途
-          {{ transitDays == null ? '待考' : `${transitDays} 天` }}
+          {{ previewTransitDays == null ? '待考' : `${previewTransitDays} 天` }}
+          （预览按正在编辑的邮路实时计算，封详情页仍按挂入时快照展示）
         </p>
         <RouteTimeline
           :nodes="previewCover ? previewTimeline : fallbackTimeline"

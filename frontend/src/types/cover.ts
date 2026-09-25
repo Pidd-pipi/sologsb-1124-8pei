@@ -1,5 +1,7 @@
 /** 实寄封（Cover）数据模型：一封实际寄递过的信封的全部编目事实。 */
 
+import type { RouteSnapshot } from './route'
+
 /** 品相 */
 export type ConditionGrade = '上品' | '中品' | '下品'
 
@@ -25,6 +27,10 @@ export interface Cover {
   cancelPmIds: number[]
   /** 所属邮路 id */
   routeId: number | null
+  /** 挂入邮路时的快照（邮路号 / 名称 / 节点）；摘除邮路后仍保留 */
+  routeSnapshot: RouteSnapshot | null
+  /** 快照写入时间（ISO）；旧数据迁移补齐时为空串 */
+  routeSnapshottedAt: string
   /** 中转地数组 */
   viaPoints: string[]
   /** 是否给据邮件 */
@@ -58,6 +64,8 @@ export function createEmptyCover(): Cover {
     franking: [],
     cancelPmIds: [],
     routeId: null,
+    routeSnapshot: null,
+    routeSnapshottedAt: '',
     viaPoints: [],
     registered: false,
     conditionGrade: '中品',

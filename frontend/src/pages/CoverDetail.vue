@@ -33,8 +33,18 @@ const coverId = computed<number | null>(() => {
   return Number.isFinite(n) && n > 0 ? n : null
 })
 
-const { cover, route, timeline, transitDays, missingDateNodes, chronological, error, load } =
-  useCoverRoute(coverId)
+const {
+  cover,
+  route,
+  snapshot,
+  timeline,
+  transitDays,
+  missingDateNodes,
+  chronological,
+  snapshotStale,
+  error,
+  load
+} = useCoverRoute(coverId)
 
 const frontUrl = ref('')
 const backUrl = ref('')
@@ -192,6 +202,56 @@ function onTimelineSelect(node: TimelineNode): void {
   if (node.kind === 'transit') ElMessage.info(`中转节点：${node.office}（${node.mark}）`)
 }
 
+function formatSnapshotTime(value: string): string {
+  if (!value) return '旧数据首次打开时补齐'
+  // ISO 转本地可读时间，精确到分钟
+  const time = new Date(value)
+  if (Number.isNaN(time.getTime())) return value
+  const pad2 = (n: number) => String(n).padStart(2, '0')
+  return `${time.getFullYear()}-${pad2(time.getMonth() + 1)}-${pad2(time.getDate())} ${pad2(
+    time.getHours()
+  )}:${pad2(time.getMinutes())}`
+}
+
+/** 所属邮路展示：在挂优先快照，已摘除但留了快照的显示历史记录。 */
+const routeDisplay = computed(() => {
+  const c = cover.value
+  if (!c) return ''
+  if (snapshot.value) return `${snapshot.value.routeNo} ${snapshot.value.name}`
+  if (typeof c.routeId === 'number') {
+    return route.value
+      ? `${route.value.routeNo} ${route.value.name}`
+      : `邮路 #${c.routeId}（快照待补）`
+  }
+  return '未挂邮路'
+})
+
+/** 已从邮路摘除，但挂入时的快照仍保留 */
+const detachedWithSnapshot = computed(
+  () => cover.value?.routeId == null && !!snapshot.value
+)
+
+/** 邮路不存在（被删除），无法同步 */
+const routeMissing = computed(
+  () => typeof cover.value?.routeId === 'number' && !route.value
+)
+
+const snapshotTimeText = computed(() =>
+  formatSnapshotTime(cover.value?.routeSnapshottedAt ?? '')
+)
+
+async function syncRoute(): Promise<void> {
+  const id = coverId.value
+  if (id == null || !route.value) return
+  const ok = await coverStore.syncRouteSnapshot(id)
+  if (ok) {
+    await load()
+    ElMessage.success('已按当前邮路替换历史快照')
+  } else {
+    ElMessage.warning('当前邮路不可用，无法同步')
+  }
+}
+
 function backToList(): void {
   void router.push('/covers')
 }
@@ -240,7 +300,18 @@ function openRoute(): void {
           <div><dt>来源</dt><dd>{{ cover.acquireFrom || '未记' }}</dd></div>
           <div><dt>购入价</dt><dd>{{ cover.price }} 元</dd></div>
           <div><dt>藏册页位</dt><dd>{{ cover.storageAlbum || '未入册' }}</dd></div>
-          <div><dt>所属邮路</dt><dd>{{ route ? `${route.routeNo} ${route.name}` : '未挂邮路' }}</dd></div>
+          <div>
+            <dt>所属邮路</dt>
+            <dd>
+              {{ routeDisplay }}
+              <el-tag v-if="detachedWithSnapshot" size="small" type="info" effect="plain">
+                已摘除，按历史记录展示
+              </el-tag>
+              <el-tag v-else-if="snapshotStale" size="small" type="warning" effect="plain">
+                邮路已变更，待同步
+              </el-tag>
+            </dd>
+          </div>
         </dl>
         <div class="cover-detail__grade">
           <span class="cover-detail__grade-label">标记品相：</span>
@@ -283,7 +354,49 @@ function openRoute(): void {
       </section>
 
       <section class="gb-panel">
-        <h2 class="gb-panel__title">寄递事实时间轴</h2>
+        <div class="cover-detail__section-head">
+          <h2 class="gb-panel__title">寄递事实时间轴</h2>
+          <span v-if="snapshot" class="cover-detail__snapshot">
+            <span class="cover-detail__snapshot-meta">
+              按 {{ snapshot.routeNo }} {{ snapshot.name }} 挂入时记录展示 ·
+              {{ snapshotTimeText }}
+            </span>
+            <el-tag v-if="detachedWithSnapshot" size="small" type="info" effect="plain">
+              已摘除，历史记录保留
+            </el-tag>
+            <el-tag v-else-if="routeMissing" size="small" type="danger" effect="plain">
+              邮路已删除，无法同步
+            </el-tag>
+            <el-tag v-else-if="snapshotStale" size="small" type="warning" effect="plain">
+              当前邮路已变更
+            </el-tag>
+            <el-tag v-else size="small" type="success" effect="plain">与当前邮路一致</el-tag>
+            <el-button
+              v-if="!detachedWithSnapshot"
+              size="small"
+              type="primary"
+              plain
+              :disabled="!route"
+              @click="syncRoute"
+            >
+              同步当前邮路
+            </el-button>
+          </span>
+          <span v-else-if="cover.routeId != null" class="cover-detail__snapshot">
+            <span class="cover-detail__snapshot-meta">
+              {{ routeMissing ? '关联邮路已删除，待重新挂接' : '尚未留存邮路记录，可按当前邮路补齐' }}
+            </span>
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              :disabled="!route"
+              @click="syncRoute"
+            >
+              同步当前邮路
+            </el-button>
+          </span>
+        </div>
         <p v-if="!chronological" class="cover-detail__warn">
           日期先后有误：请核对寄出、中转与到达日期的顺序。
         </p>
@@ -441,6 +554,16 @@ function openRoute(): void {
   justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
+}
+.cover-detail__snapshot {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cover-detail__snapshot-meta {
+  font-size: 12px;
+  color: var(--gb-muted);
 }
 .cover-detail__pm img {
   max-width: 100%;

@@ -5,11 +5,15 @@
 import { computed, ref, watch, type ComputedRef, type Ref } from 'vue'
 import { db } from '@/utils/db'
 import type { Cover } from '@/types/cover'
-import type { PostalRoute, TimelineNode } from '@/types/route'
+import type { PostalRoute, RouteSnapshot, TimelineNode } from '@/types/route'
+import { isSnapshotStale } from '@/types/route'
 import { daysBetween, isValidDate } from '@/utils/dateRange'
 
-/** 由封与邮路拼时间轴：寄出 → 中转（邮路节点 / 中转地） → 到达。 */
-export function buildTimeline(cover: Cover | null, route: PostalRoute | null): TimelineNode[] {
+/** 时间轴只需要邮路的节点，快照与现邮路都可作为来源。 */
+type TimelineRoute = PostalRoute | RouteSnapshot | null
+
+/** 由封与邮路（或挂入时的快照）拼时间轴：寄出 → 中转（节点 / 中转地） → 到达。 */
+export function buildTimeline(cover: Cover | null, route: TimelineRoute): TimelineNode[] {
   if (!cover) return []
   const nodes: TimelineNode[] = [
     {
@@ -100,7 +104,18 @@ export function useCoverRoute(coverId: Ref<number | null> | ComputedRef<number |
 
   watch(coverId, () => void load(), { immediate: true })
 
-  const timeline = computed<TimelineNode[]>(() => buildTimeline(cover.value, route.value))
+  /** 挂入邮路时留存的快照；时间轴始终按它呈现，不随后续邮路编辑变动。 */
+  const snapshot = computed<RouteSnapshot | null>(() => cover.value?.routeSnapshot ?? null)
+
+  const timeline = computed<TimelineNode[]>(() =>
+    buildTimeline(cover.value, cover.value?.routeSnapshot ?? null)
+  )
+
+  /** 快照与当前邮路是否已不一致（仅未摘除且邮路仍在时才可能为真） */
+  const snapshotStale = computed<boolean>(() => {
+    const snap = cover.value?.routeSnapshot
+    return !!snap && !!route.value && isSnapshotStale(snap, route.value)
+  })
 
   /** 在途天数：寄出日期 → 到达日期 */
   const transitDays = computed<number | null>(() => {
@@ -122,5 +137,17 @@ export function useCoverRoute(coverId: Ref<number | null> | ComputedRef<number |
     return true
   })
 
-  return { cover, route, timeline, transitDays, missingDateNodes, chronological, loading, error, load }
+  return {
+    cover,
+    route,
+    snapshot,
+    timeline,
+    transitDays,
+    missingDateNodes,
+    chronological,
+    snapshotStale,
+    loading,
+    error,
+    load
+  }
 }
